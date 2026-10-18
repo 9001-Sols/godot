@@ -30,10 +30,12 @@
 
 #pragma once
 
+#include "core/os/condition_variable.h"
 #include "core/os/mutex.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
+#include "core/templates/safe_refcount.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -68,6 +70,14 @@ private:
 	Vector<RD::PipelineImmutableSampler> immutable_samplers;
 	Vector<uint64_t> dynamic_buffers;
 
+	struct CompileState {
+		uint32_t count = 0;
+		SafeNumeric<uint32_t> next;
+		SafeNumeric<uint32_t> done;
+		BinaryMutex mutex;
+		ConditionVariable finished;
+	};
+
 	struct Version {
 		Mutex *mutex = nullptr;
 		CharString uniforms;
@@ -82,6 +92,7 @@ private:
 		HashMap<StringName, CharString> code_sections;
 		Vector<CharString> custom_defines;
 		Vector<WorkerThreadPool::GroupID> group_compilation_tasks;
+		Vector<CompileState *> group_compile_states;
 
 		Vector<Vector<uint8_t>> variant_data;
 		Vector<RID> variants;
@@ -95,7 +106,18 @@ private:
 	struct CompileData {
 		Version *version;
 		int group = 0;
+		CompileState *state = nullptr;
 	};
+
+	struct PendingGroup {
+		WorkerThreadPool::GroupID group = 0;
+		CompileState *state = nullptr;
+	};
+	BinaryMutex pending_groups_mutex;
+	LocalVector<PendingGroup> pending_groups;
+	void _reap_compile_groups(bool p_wait);
+	void _compile_claimed(CompileData p_data);
+	void _compile_variant_helper(uint32_t p_index, CompileData p_data);
 
 	// Vector will have the size of SHADER_STAGE_MAX and unused stages will have empty strings.
 	void _compile_variant(uint32_t p_variant, CompileData p_data);
