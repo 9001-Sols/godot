@@ -663,6 +663,8 @@ void BaseMaterial3D::_update_shader() {
 		return; //no update required in the end
 	}
 
+	RID shader_to_free;
+	bool reused = false;
 	{
 		MutexLock lock(shader_map_mutex);
 		ShaderData *v = shader_map.getptr(current_key);
@@ -671,7 +673,7 @@ void BaseMaterial3D::_update_shader() {
 			if (v->users == 0) {
 				// Deallocate shader which is no longer in use.
 				shader_rid = RID();
-				RS::get_singleton()->free_rid(v->shader);
+				shader_to_free = v->shader;
 				shader_map.erase(current_key);
 			}
 		}
@@ -687,8 +689,14 @@ void BaseMaterial3D::_update_shader() {
 				RS::get_singleton()->material_set_shader(_get_material(), shader_rid);
 			}
 
-			return;
+			reused = true;
 		}
+	}
+	if (shader_to_free.is_valid()) {
+		RS::get_singleton()->free_rid(shader_to_free);
+	}
+	if (reused) {
+		return;
 	}
 
 	// From this point, it is possible that multiple threads requesting the same key will
@@ -2042,26 +2050,32 @@ void fragment() {)";
 	// may also hold the shared shader_map_mutex lock.
 	RID new_shader = RS::get_singleton()->shader_create_from_code(code);
 
-	MutexLock lock(shader_map_mutex);
+	bool raced = false;
+	{
+		MutexLock lock(shader_map_mutex);
 
-	ShaderData *v = shader_map.getptr(mk);
-	if (unlikely(v)) {
-		// We raced and managed to create the same key concurrently, so we'll free the shader we just created,
-		// given we know it isn't used, and use the winner.
-		RS::get_singleton()->free_rid(new_shader);
-	} else {
-		ShaderData shader_data;
-		shader_data.shader = new_shader;
-		// ShaderData will be inserted with a users count of 0, but we
-		// increment unconditionally outside this if block, whilst still under lock.
-		v = &shader_map.insert(mk, shader_data)->value;
+		ShaderData *v = shader_map.getptr(mk);
+		if (unlikely(v)) {
+			// We raced and managed to create the same key concurrently, so we'll free the shader we just created,
+			// given we know it isn't used, and use the winner.
+			raced = true;
+		} else {
+			ShaderData shader_data;
+			shader_data.shader = new_shader;
+			// ShaderData will be inserted with a users count of 0, but we
+			// increment unconditionally outside this if block, whilst still under lock.
+			v = &shader_map.insert(mk, shader_data)->value;
+		}
+
+		shader_rid = v->shader;
+		v->users++;
+
+		if (_get_material().is_valid()) {
+			RS::get_singleton()->material_set_shader(_get_material(), shader_rid);
+		}
 	}
-
-	shader_rid = v->shader;
-	v->users++;
-
-	if (_get_material().is_valid()) {
-		RS::get_singleton()->material_set_shader(_get_material(), shader_rid);
+	if (raced) {
+		RS::get_singleton()->free_rid(new_shader);
 	}
 }
 
@@ -3982,16 +3996,20 @@ BaseMaterial3D::BaseMaterial3D(bool p_orm) :
 BaseMaterial3D::~BaseMaterial3D() {
 	ERR_FAIL_NULL(RS::get_singleton());
 
+	RID shader_to_free;
 	{
 		MutexLock lock(shader_map_mutex);
 		if (shader_map.has(current_key)) {
 			shader_map[current_key].users--;
 			if (shader_map[current_key].users == 0) {
 				// Deallocate shader which is no longer in use.
-				RS::get_singleton()->free_rid(shader_map[current_key].shader);
+				shader_to_free = shader_map[current_key].shader;
 				shader_map.erase(current_key);
 			}
 		}
+	}
+	if (shader_to_free.is_valid()) {
+		RS::get_singleton()->free_rid(shader_to_free);
 	}
 
 	if (_get_material().is_valid()) {
