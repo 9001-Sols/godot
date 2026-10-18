@@ -258,6 +258,7 @@ void ShaderRD::_initialize_version(Version *p_version) {
 	p_version->variants.resize_initialized(variant_defines.size());
 	p_version->variant_data.resize(variant_defines.size());
 	p_version->group_compilation_tasks.resize_initialized(group_enabled.size());
+	p_version->group_compile_states.resize_initialized(group_enabled.size());
 }
 
 void ShaderRD::_clear_version(Version *p_version) {
@@ -728,12 +729,58 @@ void ShaderRD::_compile_version_start(Version *p_version, int p_group) {
 	}
 #endif
 
+	_reap_compile_groups(false);
+
+	CompileState *state = memnew(CompileState);
+	state->count = group_to_variant_map[p_group].size();
+
 	CompileData compile_data;
 	compile_data.version = p_version;
 	compile_data.group = p_group;
+	compile_data.state = state;
 
-	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_compile_variant, compile_data, group_to_variant_map[p_group].size(), -1, true, SNAME("ShaderCompilation"));
+	uint32_t helpers = MIN(state->count, (uint32_t)WorkerThreadPool::get_singleton()->get_thread_count());
+	WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &ShaderRD::_compile_variant_helper, compile_data, MAX(helpers, 1u), -1, true, SNAME("ShaderCompilation"));
 	p_version->group_compilation_tasks.write[p_group] = group_task;
+	p_version->group_compile_states.write[p_group] = state;
+}
+
+void ShaderRD::_compile_claimed(CompileData p_data) {
+	CompileState *state = p_data.state;
+	while (true) {
+		uint32_t index = state->next.postincrement();
+		if (index >= state->count) {
+			return;
+		}
+		_compile_variant(index, p_data);
+		if (state->done.increment() == state->count) {
+			MutexLock lock(state->mutex);
+			state->finished.notify_all();
+		}
+	}
+}
+
+void ShaderRD::_compile_variant_helper(uint32_t p_index, CompileData p_data) {
+	_compile_claimed(p_data);
+}
+
+void ShaderRD::_reap_compile_groups(bool p_wait) {
+	LocalVector<PendingGroup> reaped;
+	{
+		MutexLock lock(pending_groups_mutex);
+		for (uint32_t i = 0; i < pending_groups.size();) {
+			if (p_wait || WorkerThreadPool::get_singleton()->is_group_task_completed(pending_groups[i].group)) {
+				reaped.push_back(pending_groups[i]);
+				pending_groups.remove_at_unordered(i);
+			} else {
+				i++;
+			}
+		}
+	}
+	for (const PendingGroup &pending : reaped) {
+		WorkerThreadPool::get_singleton()->wait_for_group_task_completion(pending.group);
+		memdelete(pending.state);
+	}
 }
 
 void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
@@ -741,8 +788,24 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 		return;
 	}
 	WorkerThreadPool::GroupID group_task = p_version->group_compilation_tasks[p_group];
-	WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
+	CompileState *state = p_version->group_compile_states[p_group];
+	CompileData compile_data;
+	compile_data.version = p_version;
+	compile_data.group = p_group;
+	compile_data.state = state;
+	_compile_claimed(compile_data);
+	{
+		MutexLock lock(state->mutex);
+		while (state->done.get() < state->count) {
+			state->finished.wait(lock);
+		}
+	}
+	{
+		MutexLock lock(pending_groups_mutex);
+		pending_groups.push_back({ group_task, state });
+	}
 	p_version->group_compilation_tasks.write[p_group] = 0;
+	p_version->group_compile_states.write[p_group] = nullptr;
 
 	bool all_valid = true;
 
@@ -1238,4 +1301,5 @@ ShaderRD::~ShaderRD() {
 			version_free(version_rid);
 		}
 	}
+	_reap_compile_groups(true);
 }
