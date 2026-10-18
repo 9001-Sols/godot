@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/object/worker_thread_pool.h"
+#include "core/os/condition_variable.h"
 #include "core/os/mutex.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
@@ -42,6 +43,41 @@
 #include "servers/rendering/rendering_server_enums.h"
 
 #define PRINT_PIPELINE_COMPILATION_KEYS 0
+
+struct PipelineCompileToken {
+	BinaryMutex mutex;
+	ConditionVariable idle;
+	bool cancelled = false;
+	uint32_t running = 0;
+	SafeRefCount refs;
+};
+
+inline Mutex pipeline_compile_orphans_mutex;
+inline LocalVector<WorkerThreadPool::TaskID> pipeline_compile_orphans;
+
+inline void pipeline_compile_token_unref(PipelineCompileToken *p_token) {
+	if (p_token->refs.unref()) {
+		memdelete(p_token);
+	}
+}
+
+inline void pipeline_compile_reap_orphans(bool p_wait) {
+	LocalVector<WorkerThreadPool::TaskID> reaped;
+	{
+		MutexLock lock(pipeline_compile_orphans_mutex);
+		for (uint32_t i = 0; i < pipeline_compile_orphans.size();) {
+			if (p_wait || WorkerThreadPool::get_singleton()->is_task_completed(pipeline_compile_orphans[i])) {
+				reaped.push_back(pipeline_compile_orphans[i]);
+				pipeline_compile_orphans.remove_at_unordered(i);
+			} else {
+				i++;
+			}
+		}
+	}
+	for (WorkerThreadPool::TaskID task_id : reaped) {
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id);
+	}
+}
 
 template <typename Key, typename CreationClass, typename CreationFunction>
 class PipelineHashMapRD {
@@ -56,6 +92,45 @@ private:
 	RBSet<uint32_t> compilation_set;
 	HashMap<uint32_t, WorkerThreadPool::TaskID> compilation_tasks;
 	Mutex local_mutex;
+	PipelineCompileToken *compile_token = nullptr;
+
+	struct CompileTask {
+		PipelineCompileToken *token = nullptr;
+		CreationClass *object = nullptr;
+		CreationFunction function = nullptr;
+		Key key;
+	};
+
+	static void _run_compile_task(void *p_userdata) {
+		CompileTask *task = static_cast<CompileTask *>(p_userdata);
+		PipelineCompileToken *token = task->token;
+		bool run = false;
+		{
+			MutexLock lock(token->mutex);
+			if (!token->cancelled) {
+				token->running++;
+				run = true;
+			}
+		}
+		if (run) {
+			(task->object->*task->function)(task->key);
+			MutexLock lock(token->mutex);
+			token->running--;
+			if (token->running == 0) {
+				token->idle.notify_all();
+			}
+		}
+		memdelete(task);
+		pipeline_compile_token_unref(token);
+	}
+
+	PipelineCompileToken *_token() {
+		if (compile_token == nullptr) {
+			compile_token = memnew(PipelineCompileToken);
+			compile_token->refs.init();
+		}
+		return compile_token;
+	}
 
 	bool _add_new_pipelines_to_map() {
 		thread_local Vector<uint32_t> hashes_added;
@@ -84,19 +159,36 @@ private:
 		return !hashes_added.is_empty();
 	}
 
-	void _wait_for_all_pipelines() {
-		thread_local LocalVector<WorkerThreadPool::TaskID> tasks_to_wait;
-		tasks_to_wait.clear();
+	void _cancel_all_pipelines() {
+		PipelineCompileToken *token = nullptr;
+		LocalVector<WorkerThreadPool::TaskID> orphaned;
 		{
 			MutexLock local_lock(local_mutex);
+			token = compile_token;
+			compile_token = nullptr;
 			for (KeyValue<uint32_t, WorkerThreadPool::TaskID> key_value : compilation_tasks) {
-				tasks_to_wait.push_back(key_value.value);
+				orphaned.push_back(key_value.value);
+			}
+			compilation_tasks.clear();
+		}
+		if (token == nullptr) {
+			return;
+		}
+		{
+			MutexLock lock(token->mutex);
+			token->cancelled = true;
+			while (token->running > 0) {
+				token->idle.wait(lock);
 			}
 		}
-
-		for (WorkerThreadPool::TaskID task_id : tasks_to_wait) {
-			WorkerThreadPool::get_singleton()->wait_for_task_completion(task_id);
+		{
+			MutexLock lock(pipeline_compile_orphans_mutex);
+			for (WorkerThreadPool::TaskID task_id : orphaned) {
+				pipeline_compile_orphans.push_back(task_id);
+			}
 		}
+		pipeline_compile_token_unref(token);
+		pipeline_compile_reap_orphans(false);
 	}
 
 public:
@@ -148,7 +240,14 @@ public:
 #endif
 
 		// Queue a background compilation task.
-		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(creation_object, creation_function, p_key, p_high_priority, "PipelineCompilation");
+		PipelineCompileToken *token = _token();
+		token->refs.ref();
+		CompileTask *task = memnew(CompileTask);
+		task->token = token;
+		task->object = creation_object;
+		task->function = creation_function;
+		task->key = p_key;
+		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_native_task(&PipelineHashMapRD::_run_compile_task, task, p_high_priority, "PipelineCompilation");
 		compilation_tasks.insert(p_key_hash, task_id);
 	}
 
@@ -210,9 +309,9 @@ public:
 		}
 	}
 
-	// Delete all cached pipelines. Can stall if background compilation is in progress.
+	// Delete all cached pipelines. Waits only for compilations already running; queued ones are skipped.
 	void clear_pipelines() {
-		_wait_for_all_pipelines();
+		_cancel_all_pipelines();
 		_add_new_pipelines_to_map();
 
 		for (KeyValue<uint32_t, RID> entry : hash_map) {
