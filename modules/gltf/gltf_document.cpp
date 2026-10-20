@@ -1429,6 +1429,7 @@ Error GLTFDocument::_parse_meshes(Ref<GLTFState> p_state) {
 		mesh->set_name(import_mesh->get_name());
 		TypedArray<Material> instance_materials;
 
+		int corrected_tangents = 0;
 		for (int j = 0; j < primitives.size(); j++) {
 			uint64_t flags = RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES;
 			Dictionary mesh_prim = primitives[j];
@@ -1808,12 +1809,22 @@ Error GLTFDocument::_parse_meshes(Ref<GLTFState> p_state) {
 					ERR_PRINT("glTF import: Mesh " + itos(i) + " has invalid tangents.");
 					flags &= ~RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES;
 				} else {
+					bool tangents_changed = false;
 					for (int vert = 0; vert < normals.size(); vert++) {
 						Vector3 tan = Vector3(tangents[vert * 4 + 0], tangents[vert * 4 + 1], tangents[vert * 4 + 2]);
 						if (std::abs(tan.dot(normals[vert])) > 0.0001) {
-							// Tangent is not perpendicular to the normal, so we can't use compression.
-							flags &= ~RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES;
+							const Vector3 normal = normals[vert].normalized();
+							tan -= normal * tan.dot(normal);
+							tan = tan.length_squared() < CMP_EPSILON2 ? normal.get_any_perpendicular() : tan.normalized();
+							tangents.write[vert * 4 + 0] = tan.x;
+							tangents.write[vert * 4 + 1] = tan.y;
+							tangents.write[vert * 4 + 2] = tan.z;
+							corrected_tangents++;
+							tangents_changed = true;
 						}
+					}
+					if (tangents_changed) {
+						array[Mesh::ARRAY_TANGENT] = tangents;
 					}
 				}
 			}
@@ -1951,6 +1962,9 @@ Error GLTFDocument::_parse_meshes(Ref<GLTFState> p_state) {
 			}
 			import_mesh->add_surface(primitive, array, morphs,
 					Dictionary(), mat, mat_name, flags);
+		}
+		if (corrected_tangents > 0) {
+			print_verbose(vformat("glTF: Mesh %d: corrected %d non-perpendicular tangents.", i, corrected_tangents));
 		}
 
 		Vector<float> blend_weights;
