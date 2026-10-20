@@ -497,6 +497,10 @@ public:
 		}
 	}
 
+	_FORCE_INLINE_ bool mesh_surface_has_indices(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->index_count > 0;
+	}
+
 	_FORCE_INLINE_ RID mesh_surface_get_index_array(void *p_surface, uint32_t p_lod) const {
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
 

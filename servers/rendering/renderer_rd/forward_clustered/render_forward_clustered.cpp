@@ -495,6 +495,13 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		RID pipeline_rd;
 		const uint32_t ubershader_iterations = 2;
 		bool pipeline_valid = false;
+		if (!emulate_point_size) {
+			index_array_rd = mesh_storage->mesh_surface_get_index_array(mesh_surface, element_info.lod_index);
+			if (index_array_rd.is_null() && mesh_storage->mesh_surface_has_indices(mesh_surface)) {
+				continue;
+			}
+		}
+
 		while (pipeline_key.ubershader < ubershader_iterations) {
 			// Skeleton and blend shape.
 			RD::VertexFormatID vertex_format = -1;
@@ -504,6 +511,10 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				mesh_storage->mesh_instance_surface_get_vertex_arrays_and_format(surf->owner->mesh_instance, surf->surface_index, input_mask, pipeline_motion_vectors, emulate_point_size, vertex_array_rd, vertex_format);
 			} else {
 				mesh_storage->mesh_surface_get_vertex_arrays_and_format(mesh_surface, input_mask, pipeline_motion_vectors, emulate_point_size, vertex_array_rd, vertex_format);
+			}
+
+			if (vertex_array_rd.is_null()) {
+				break;
 			}
 
 			pipeline_key.vertex_format_id = vertex_format;
@@ -538,12 +549,6 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		}
 
 		if (pipeline_valid) {
-			if (!emulate_point_size) {
-				index_array_rd = mesh_storage->mesh_surface_get_index_array(mesh_surface, element_info.lod_index);
-			} else {
-				index_array_rd = RID();
-			}
-
 			if (prev_vertex_array_rd != vertex_array_rd) {
 				RD::get_singleton()->draw_list_bind_vertex_array(draw_list, vertex_array_rd);
 				prev_vertex_array_rd = vertex_array_rd;

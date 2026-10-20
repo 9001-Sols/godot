@@ -1522,6 +1522,12 @@ void MeshStorage::_mesh_surface_generate_version_for_input_mask(Mesh::Surface::V
 	v.previous_buffer = p_previous_buffer;
 	v.input_motion_vectors = p_input_motion_vectors;
 	v.point_size_emulated = p_point_size_emulated;
+	for (const RID &vertex_buffer : buffers) {
+		if (vertex_buffer.is_null()) {
+			v.vertex_array = RID();
+			return;
+		}
+	}
 	v.vertex_array = RD::get_singleton()->vertex_array_create(p_point_size_emulated ? 0 : s->vertex_count, v.vertex_format, buffers, offsets);
 }
 
