@@ -752,8 +752,13 @@ coff_add (struct backtrace_state *state, int descriptor,
 
       if (s->name[0] == '/')
 	{
-	  /* Extended section name.  */
-	  str_off = atoi (s->name + 1);
+	  /* Extended section name.  A full "/NNNNNNN" has no terminating NUL,
+	     so atoi on s->name + 1 would read on into the section header.  */
+	  char digits[8];
+
+	  memcpy (digits, s->name + 1, 7);
+	  digits[7] = '\0';
+	  str_off = atoi (digits);
 	}
       else
 	str_off = 0;
