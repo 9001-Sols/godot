@@ -52,8 +52,14 @@
 // beside the log (<user data dir>/logs/crash-<UTC time>-<pid>.dmp) and its path is printed
 // to the log as "[crash] minidump: ...", where the game's next-launch crash capture finds
 // it and preserves it with the log.
+//
+// dbghelp.dll is loaded at crash time rather than linked: the build links dbghelp only with
+// debug features, and a release template must not gain an import for this.
 
 namespace {
+
+typedef BOOL(WINAPI *MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION,
+		PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
 
 std::atomic<bool> minidump_done{ false };
 LPTOP_LEVEL_EXCEPTION_FILTER previous_filter = nullptr;
@@ -96,6 +102,13 @@ void WriteCrashMinidump(EXCEPTION_POINTERS *ep) {
 		return;
 	}
 
+	HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
+	MiniDumpWriteDumpFn write_dump = dbghelp != nullptr ? (MiniDumpWriteDumpFn)(void *)GetProcAddress(dbghelp, "MiniDumpWriteDump") : nullptr;
+	if (write_dump == nullptr) {
+		print_error(vformat("[crash] minidump FAILED: dbghelp.dll MiniDumpWriteDump unavailable (error %d)", (int)GetLastError()));
+		return;
+	}
+
 	String path = minidump_path();
 	Char16String path16 = path.utf16();
 	HANDLE file = CreateFileW((LPCWSTR)path16.get_data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -109,7 +122,7 @@ void WriteCrashMinidump(EXCEPTION_POINTERS *ep) {
 	exception_info.ExceptionPointers = ep;
 	exception_info.ClientPointers = FALSE;
 	const MINIDUMP_TYPE type = (MINIDUMP_TYPE)(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory);
-	BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
+	BOOL ok = write_dump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
 			ep != nullptr ? &exception_info : nullptr, nullptr, nullptr);
 	DWORD error = ok ? 0 : GetLastError();
 	CloseHandle(file);
