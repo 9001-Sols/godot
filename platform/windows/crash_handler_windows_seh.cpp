@@ -141,6 +141,10 @@ DWORD CrashHandlerException(EXCEPTION_POINTERS *ep) {
 		OS::get_singleton()->get_main_loop()->notification(MainLoop::NOTIFICATION_CRASH);
 	}
 
+	// Minidump first, while every thread (render thread included) is closest to its
+	// crashing state; the backtrace below only covers this thread.
+	WriteCrashMinidump(ep);
+
 	print_error("\n================================================================");
 	print_error(vformat("%s: Program crashed", __FUNCTION__));
 
@@ -272,8 +276,10 @@ void CrashHandler::disable() {
 		return;
 	}
 
+	UninstallCrashMinidump();
 	disabled = true;
 }
 
 void CrashHandler::initialize() {
+	InstallCrashMinidump();
 }

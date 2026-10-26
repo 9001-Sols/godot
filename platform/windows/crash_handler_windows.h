@@ -32,6 +32,13 @@
 
 #include <windows.h>
 
+// Minidump on crash, in every build (crash_handler_windows_minidump.cpp). Unlike the
+// backtrace below this is not gated on DEBUG_ENABLED: a release template must still leave
+// a symbolisable record of all threads when it dies.
+extern void WriteCrashMinidump(EXCEPTION_POINTERS *ep);
+extern void InstallCrashMinidump();
+extern void UninstallCrashMinidump();
+
 // Crash handler exception only enabled with MSVC
 #if defined(DEBUG_ENABLED)
 #define CRASH_HANDLER_EXCEPTION 1

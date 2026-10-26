@@ -230,6 +230,10 @@ extern void CrashHandlerException(int signal) {
 		OS::get_singleton()->get_main_loop()->notification(MainLoop::NOTIFICATION_CRASH);
 	}
 
+	// Minidump first, while every thread (render thread included) is closest to its
+	// crashing state; the backtrace below only covers this thread.
+	WriteCrashMinidump(nullptr);
+
 	print_error("\n================================================================");
 	print_error(vformat("%s: Program crashed with signal %d", __FUNCTION__, signal));
 
@@ -314,6 +318,7 @@ void CrashHandler::disable() {
 	signal(SIGFPE, nullptr);
 	signal(SIGILL, nullptr);
 #endif
+	UninstallCrashMinidump();
 
 	disabled = true;
 }
@@ -324,4 +329,5 @@ void CrashHandler::initialize() {
 	signal(SIGFPE, CrashHandlerException);
 	signal(SIGILL, CrashHandlerException);
 #endif
+	InstallCrashMinidump();
 }
