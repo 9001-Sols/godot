@@ -8468,6 +8468,7 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 			frame_failed = true;
 			break;
 		}
+		driver->fence_set_frame_index(frames[i].fence, i);
 		frames[i].fence_signaled = false;
 
 		// Create query pool.

@@ -1832,6 +1832,18 @@ Error RenderingDeviceDriverVulkan::initialize(uint32_t p_device_index, uint32_t 
 	context_device = context_driver->device_get(p_device_index);
 	physical_device = context_driver->physical_device_get(p_device_index);
 	frame_count = p_frame_count;
+	frame_fences.resize(frame_count);
+	for (uint32_t i = 0; i < frame_count; i++) {
+		frame_fences[i] = nullptr;
+	}
+	const String timeout = OS::get_singleton()->get_environment("GODOT_FENCE_TIMEOUT_SEC");
+	if (!timeout.is_empty()) {
+		if (timeout.is_valid_int() && timeout.to_int() >= 0 && timeout.to_int() <= INT64_MAX / 1000000) {
+			fence_timeout_usec = uint64_t(timeout.to_int()) * 1000000;
+		} else {
+			WARN_PRINT("Invalid GODOT_FENCE_TIMEOUT_SEC; using the default 10 second fence timeout. Use a nonnegative integer (0 waits forever).");
+		}
+	}
 
 	// Copy the queue family properties the context already retrieved.
 	uint32_t queue_family_count = context_driver->queue_family_get_count(p_device_index);
@@ -3050,6 +3062,130 @@ void RenderingDeviceDriverVulkan::command_pipeline_barrier(
 /**** FENCES ****/
 /****************/
 
+uint64_t RenderingDeviceDriverVulkan::_record_queue_event(VkQueue p_queue, const VkSubmitInfo *p_submit, const VkPresentInfoKHR *p_present, Fence *p_fence) {
+	MutexLock lock(queue_history_mutex);
+	const uint64_t sequence = ++queue_history_sequence;
+	QueueEvent &event = queue_history[(sequence - 1) % QUEUE_HISTORY_SIZE];
+	event = {};
+	event.sequence = sequence;
+	event.timestamp_usec = OS::get_singleton()->get_ticks_usec();
+	event.frame_number = diagnostic_frame_number;
+	event.frame_index = diagnostic_frame_index;
+	event.queue = p_queue;
+	event.present = p_present != nullptr;
+	if (p_submit != nullptr) {
+		event.command_buffer_count = p_submit->commandBufferCount;
+		event.wait_count = p_submit->waitSemaphoreCount;
+		event.signal_count = p_submit->signalSemaphoreCount;
+		for (uint32_t i = 0; i < MIN(event.wait_count, QUEUE_HISTORY_SEMAPHORES); i++) {
+			event.waits[i] = p_submit->pWaitSemaphores[i];
+		}
+		for (uint32_t i = 0; i < MIN(event.signal_count, QUEUE_HISTORY_SEMAPHORES); i++) {
+			event.signals[i] = p_submit->pSignalSemaphores[i];
+		}
+		if (p_fence != nullptr) {
+			event.fence = p_fence->vk_fence;
+			p_fence->last_submission = event;
+			p_fence->pending = true;
+		}
+	} else if (p_present != nullptr) {
+		event.wait_count = p_present->waitSemaphoreCount;
+		event.swapchain_count = p_present->swapchainCount;
+		for (uint32_t i = 0; i < MIN(event.wait_count, QUEUE_HISTORY_SEMAPHORES); i++) {
+			event.waits[i] = p_present->pWaitSemaphores[i];
+		}
+		for (uint32_t i = 0; i < MIN(event.swapchain_count, QUEUE_HISTORY_SWAPCHAINS); i++) {
+			event.swapchains[i] = p_present->pSwapchains[i];
+			event.image_indices[i] = p_present->pImageIndices[i];
+			event.present_results[i] = VK_NOT_READY;
+		}
+	}
+	return sequence;
+}
+
+void RenderingDeviceDriverVulkan::_finish_queue_event(uint64_t p_sequence, VkResult p_result, const VkPresentInfoKHR *p_present, Fence *p_fence) {
+	MutexLock lock(queue_history_mutex);
+	QueueEvent &event = queue_history[(p_sequence - 1) % QUEUE_HISTORY_SIZE];
+	// Another queue can wrap the ring while the Vulkan call is in progress.
+	if (event.sequence == p_sequence) {
+		event.result = p_result;
+		event.completed = true;
+		if (p_present != nullptr) {
+			for (uint32_t i = 0; i < MIN(event.swapchain_count, QUEUE_HISTORY_SWAPCHAINS); i++) {
+				event.present_results[i] = p_present->pResults[i];
+			}
+		}
+	}
+	if (p_fence != nullptr && p_fence->last_submission.sequence == p_sequence) {
+		p_fence->last_submission.result = p_result;
+		p_fence->last_submission.completed = true;
+	}
+}
+
+void RenderingDeviceDriverVulkan::_print_queue_event(const QueueEvent &p_event) {
+	_err_print_error_asap(vformat("  #%d %s t_us=%d frame=%d slot=%d queue=0x%ux fence=0x%ux command_buffers=%d returned=%s result=%d",
+			p_event.sequence, p_event.present ? "present" : "submit", p_event.timestamp_usec, p_event.frame_number, p_event.frame_index,
+			(uint64_t)p_event.queue, (uint64_t)p_event.fence, p_event.command_buffer_count, p_event.completed ? "yes" : "no", p_event.result));
+	String waits;
+	String signals;
+	for (uint32_t i = 0; i < MIN(p_event.wait_count, QUEUE_HISTORY_SEMAPHORES); i++) {
+		waits += vformat(" 0x%ux", (uint64_t)p_event.waits[i]);
+	}
+	for (uint32_t i = 0; i < MIN(p_event.signal_count, QUEUE_HISTORY_SEMAPHORES); i++) {
+		signals += vformat(" 0x%ux", (uint64_t)p_event.signals[i]);
+	}
+	_err_print_error_asap(vformat("    wait_semaphores=%d [%s ] signal_semaphores=%d [%s ] (first %d of each retained)", p_event.wait_count, waits, p_event.signal_count, signals, QUEUE_HISTORY_SEMAPHORES));
+	for (uint32_t i = 0; i < MIN(p_event.swapchain_count, QUEUE_HISTORY_SWAPCHAINS); i++) {
+		_err_print_error_asap(vformat("    swapchain=0x%ux image=%d present_result=%d", (uint64_t)p_event.swapchains[i], p_event.image_indices[i], p_event.present_results[i]));
+	}
+	if (p_event.swapchain_count > QUEUE_HISTORY_SWAPCHAINS) {
+		_err_print_error_asap(vformat("    swapchains=%d (first %d retained)", p_event.swapchain_count, QUEUE_HISTORY_SWAPCHAINS));
+	}
+}
+
+void RenderingDeviceDriverVulkan::_crash_fence_diagnostics(Fence *p_fence, uint64_t p_elapsed_usec, const char *p_reason, bool p_device_lost) {
+	{
+		// Never take a queue submit mutex here: a driver call on another queue may be stuck.
+		// This lock also keeps frame fences alive while querying their status.
+		MutexLock lock(queue_history_mutex);
+		_err_print_error_asap("=== Vulkan fence diagnostics ===");
+		_err_print_error_asap(vformat("reason=%s frame=%d last_recording_slot=%d frames_in_flight=%d elapsed_ms=%d timeout_ms=%d t_us=%d",
+				p_reason, diagnostic_frame_number, diagnostic_frame_index, frame_count, p_elapsed_usec / 1000, fence_timeout_usec / 1000, OS::get_singleton()->get_ticks_usec()));
+		_err_print_error_asap("VkResult: SUCCESS=0 NOT_READY=1 TIMEOUT=2 ERROR_DEVICE_LOST=-4; timestamps are monotonic microseconds since engine start.");
+		if (p_fence != nullptr) {
+			_err_print_error_asap(vformat("waited_fence=0x%ux frame_slot=%d pending=%s status=%d", (uint64_t)p_fence->vk_fence, p_fence->frame_index, p_fence->pending ? "yes" : "no", vkGetFenceStatus(vk_device, p_fence->vk_fence)));
+			if (p_fence->last_submission.sequence != 0) {
+				_err_print_error_asap("Submission responsible for signaling this fence (retained independently of ring):");
+				_print_queue_event(p_fence->last_submission);
+			} else {
+				_err_print_error_asap("No recorded submission for this fence.");
+			}
+		}
+		_err_print_error_asap("Frame fences (pending means submitted and not yet waited/reset):");
+		for (uint32_t i = 0; i < frame_fences.size(); i++) {
+			const Fence *fence = frame_fences[i];
+			if (fence == nullptr) {
+				_err_print_error_asap(vformat("  slot=%d fence not created or already freed", i));
+				continue;
+			}
+			_err_print_error_asap(vformat("  slot=%d fence=0x%ux pending=%s status=%d submission=#%d submitted_frame=%d",
+					i, (uint64_t)fence->vk_fence, fence->pending ? "yes" : "no", vkGetFenceStatus(vk_device, fence->vk_fence), fence->last_submission.sequence, fence->last_submission.frame_number));
+		}
+		_err_print_error_asap("Queue history, oldest first (returned describes the CPU call, not GPU completion):");
+		const uint64_t first = queue_history_sequence > QUEUE_HISTORY_SIZE ? queue_history_sequence - QUEUE_HISTORY_SIZE + 1 : 1;
+		for (uint64_t sequence = first; sequence <= queue_history_sequence; sequence++) {
+			_print_queue_event(queue_history[(sequence - 1) % QUEUE_HISTORY_SIZE]);
+		}
+		_err_print_error_asap("=== End Vulkan fence diagnostics ===");
+	}
+	// Keep the existing breadcrumbs and device fault report on device loss.
+	// A timeout skips these driver queries and goes straight to the minidump trap.
+	if (p_device_lost) {
+		print_lost_device_info();
+	}
+	CRASH_NOW_MSG(p_reason);
+}
+
 RDD::FenceID RenderingDeviceDriverVulkan::fence_create() {
 	VkFence vk_fence = VK_NULL_HANDLE;
 	VkFenceCreateInfo create_info = {};
@@ -3063,16 +3199,61 @@ RDD::FenceID RenderingDeviceDriverVulkan::fence_create() {
 	return FenceID(fence);
 }
 
+void RenderingDeviceDriverVulkan::fence_set_frame_index(FenceID p_fence, uint32_t p_frame_index) {
+	ERR_FAIL_UNSIGNED_INDEX(p_frame_index, frame_count);
+	MutexLock lock(queue_history_mutex);
+	Fence *fence = (Fence *)p_fence.id;
+	fence->frame_index = p_frame_index;
+	frame_fences[p_frame_index] = fence;
+}
+
 Error RenderingDeviceDriverVulkan::fence_wait(FenceID p_fence) {
 	Fence *fence = (Fence *)(p_fence.id);
 	VkResult fence_status = vkGetFenceStatus(vk_device, fence->vk_fence);
+	if (fence_status == VK_ERROR_DEVICE_LOST) {
+		_crash_fence_diagnostics(fence, 0, "VK_ERROR_DEVICE_LOST from vkGetFenceStatus", true);
+	}
+	ERR_FAIL_COND_V_MSG(fence_status != VK_SUCCESS && fence_status != VK_NOT_READY, FAILED, vformat("Couldn't query Vulkan fence (VkResult error %d).", fence_status));
 	if (fence_status == VK_NOT_READY) {
-		VkResult err = vkWaitForFences(vk_device, 1, &fence->vk_fence, VK_TRUE, UINT64_MAX);
-		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't wait for Vulkan fence (VkResult error %d).", err));
+		const uint64_t started_usec = OS::get_singleton()->get_ticks_usec();
+		bool warned = false;
+		while (true) {
+			uint64_t elapsed_usec = OS::get_singleton()->get_ticks_usec() - started_usec;
+			if (fence_timeout_usec != 0 && elapsed_usec >= fence_timeout_usec) {
+				_crash_fence_diagnostics(fence, elapsed_usec, "Vulkan fence wait timed out");
+			}
+			const uint64_t slice_usec = fence_timeout_usec == 0 ? 1000000 : MIN(uint64_t(1000000), fence_timeout_usec - elapsed_usec);
+			VkResult wait_result = vkWaitForFences(vk_device, 1, &fence->vk_fence, VK_TRUE, slice_usec * 1000);
+			elapsed_usec = OS::get_singleton()->get_ticks_usec() - started_usec;
+			if (wait_result == VK_ERROR_DEVICE_LOST) {
+				_crash_fence_diagnostics(fence, elapsed_usec, "VK_ERROR_DEVICE_LOST from vkWaitForFences", true);
+			}
+			if (!warned && elapsed_usec >= 2000000) {
+				uint32_t frame_number;
+				{
+					MutexLock lock(queue_history_mutex);
+					frame_number = diagnostic_frame_number;
+				}
+				WARN_PRINT(vformat("Vulkan fence wait: frame=%d fence=0x%ux elapsed_ms=%d", frame_number, (uint64_t)fence->vk_fence, elapsed_usec / 1000));
+				warned = true;
+			}
+			if (wait_result == VK_SUCCESS) {
+				break;
+			}
+			ERR_FAIL_COND_V_MSG(wait_result != VK_TIMEOUT, FAILED, vformat("Couldn't wait for Vulkan fence (VkResult error %d).", wait_result));
+		}
 	}
 
 	VkResult err = vkResetFences(vk_device, 1, &fence->vk_fence);
+	if (err == VK_ERROR_DEVICE_LOST) {
+		_crash_fence_diagnostics(fence, 0, "VK_ERROR_DEVICE_LOST from vkResetFences", true);
+	}
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't reset Vulkan fence (VkResult error %d).", err));
+
+	{
+		MutexLock lock(queue_history_mutex);
+		fence->pending = false;
+	}
 
 	if (fence->queue_signaled_from != nullptr) {
 		// Release all semaphores that the command queue associated to the fence waited on the last time it was submitted.
@@ -3096,6 +3277,12 @@ Error RenderingDeviceDriverVulkan::fence_wait(FenceID p_fence) {
 
 void RenderingDeviceDriverVulkan::fence_free(FenceID p_fence) {
 	Fence *fence = (Fence *)(p_fence.id);
+	{
+		MutexLock lock(queue_history_mutex);
+		if (fence->frame_index != UINT32_MAX) {
+			frame_fences[fence->frame_index] = nullptr;
+		}
+	}
 	vkDestroyFence(vk_device, fence->vk_fence, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_FENCE));
 	memdelete(fence);
 }
@@ -3276,12 +3463,13 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		submit_info.pSignalSemaphores = signal_semaphores.ptr();
 
 		device_queue.submit_mutex.lock();
+		const uint64_t submission = _record_queue_event(device_queue.queue, &submit_info, nullptr, fence);
 		err = vkQueueSubmit(device_queue.queue, 1, &submit_info, vk_fence);
+		_finish_queue_event(submission, err, nullptr, fence);
 		device_queue.submit_mutex.unlock();
 
 		if (err == VK_ERROR_DEVICE_LOST) {
-			print_lost_device_info();
-			CRASH_NOW_MSG("Vulkan device was lost. This could be due to a driver issue, a hardware issue, or the driver resetting itself because it was unresponsive for too long (TDR).");
+			_crash_fence_diagnostics(fence, 0, "VK_ERROR_DEVICE_LOST from vkQueueSubmit", true);
 		}
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't submit to Vulkan queue (VkResult error %d).", err));
 
@@ -3317,6 +3505,9 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		}
 
 		results.resize(swapchains.size());
+		for (uint32_t i = 0; i < results.size(); i++) {
+			results[i] = VK_NOT_READY;
+		}
 
 		VkPresentInfoKHR present_info = {};
 		present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -3328,6 +3519,7 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		present_info.pResults = results.ptr();
 
 		device_queue.submit_mutex.lock();
+		const uint64_t presentation = _record_queue_event(device_queue.queue, nullptr, &present_info, nullptr);
 #if defined(SWAPPY_FRAME_PACING_ENABLED)
 		if (swappy_frame_pacer_enable) {
 			err = SwappyVk_queuePresent(device_queue.queue, &present_info);
@@ -3338,13 +3530,20 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		err = device_functions.QueuePresentKHR(device_queue.queue, &present_info);
 #endif
 
+		_finish_queue_event(presentation, err, &present_info, nullptr);
 		device_queue.submit_mutex.unlock();
+		if (err == VK_ERROR_DEVICE_LOST) {
+			_crash_fence_diagnostics(fence, 0, "VK_ERROR_DEVICE_LOST from vkQueuePresentKHR", true);
+		}
 
 		// Set the index to an invalid value. If any of the swap chains returned out of date, indicate it should be resized the next time it's acquired.
 		bool any_result_is_out_of_date = false;
 		for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 			SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
 			swap_chain->image_index = UINT_MAX;
+			if (results[i] == VK_ERROR_DEVICE_LOST) {
+				_crash_fence_diagnostics(fence, 0, "VK_ERROR_DEVICE_LOST from vkQueuePresentKHR per-swapchain result", true);
+			}
 			if (results[i] == VK_ERROR_OUT_OF_DATE_KHR) {
 				context_driver->surface_set_needs_resize(swap_chain->surface, true);
 				any_result_is_out_of_date = true;
@@ -7161,7 +7360,9 @@ inline String RenderingDeviceDriverVulkan::get_vulkan_result(VkResult err) {
 /********************/
 
 void RenderingDeviceDriverVulkan::begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) {
-	// Per-frame segments are not required in Vulkan.
+	MutexLock lock(queue_history_mutex);
+	diagnostic_frame_index = p_frame_index;
+	diagnostic_frame_number = p_frames_drawn;
 }
 
 void RenderingDeviceDriverVulkan::end_segment() {

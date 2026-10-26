@@ -344,13 +344,55 @@ public:
 	/****************/
 
 private:
+	// Fixed storage: recording queue activity must not allocate or format strings.
+	static constexpr uint32_t QUEUE_HISTORY_SIZE = 16;
+	static constexpr uint32_t QUEUE_HISTORY_SEMAPHORES = 16;
+	static constexpr uint32_t QUEUE_HISTORY_SWAPCHAINS = 8;
+	struct QueueEvent {
+		uint64_t sequence = 0;
+		uint64_t timestamp_usec = 0;
+		uint32_t frame_number = 0;
+		uint32_t frame_index = 0;
+		VkQueue queue = VK_NULL_HANDLE;
+		VkFence fence = VK_NULL_HANDLE;
+		uint32_t command_buffer_count = 0;
+		uint32_t wait_count = 0;
+		uint32_t signal_count = 0;
+		uint32_t swapchain_count = 0;
+		VkSemaphore waits[QUEUE_HISTORY_SEMAPHORES] = {};
+		VkSemaphore signals[QUEUE_HISTORY_SEMAPHORES] = {};
+		VkSwapchainKHR swapchains[QUEUE_HISTORY_SWAPCHAINS] = {};
+		uint32_t image_indices[QUEUE_HISTORY_SWAPCHAINS] = {};
+		VkResult present_results[QUEUE_HISTORY_SWAPCHAINS] = {};
+		VkResult result = VK_NOT_READY;
+		bool present = false;
+		bool completed = false;
+	};
+
 	struct Fence {
 		VkFence vk_fence = VK_NULL_HANDLE;
 		CommandQueue *queue_signaled_from = nullptr;
+		QueueEvent last_submission;
+		uint32_t frame_index = UINT32_MAX;
+		bool pending = false;
 	};
+
+	BinaryMutex queue_history_mutex;
+	QueueEvent queue_history[QUEUE_HISTORY_SIZE];
+	uint64_t queue_history_sequence = 0;
+	uint32_t diagnostic_frame_number = 0;
+	uint32_t diagnostic_frame_index = 0;
+	LocalVector<Fence *> frame_fences;
+	uint64_t fence_timeout_usec = 10000000; // GODOT_FENCE_TIMEOUT_SEC=0 disables the deadline.
+
+	uint64_t _record_queue_event(VkQueue p_queue, const VkSubmitInfo *p_submit, const VkPresentInfoKHR *p_present, Fence *p_fence);
+	void _finish_queue_event(uint64_t p_sequence, VkResult p_result, const VkPresentInfoKHR *p_present, Fence *p_fence);
+	void _print_queue_event(const QueueEvent &p_event);
+	void _crash_fence_diagnostics(Fence *p_fence, uint64_t p_elapsed_usec, const char *p_reason, bool p_device_lost = false);
 
 public:
 	virtual FenceID fence_create() override final;
+	virtual void fence_set_frame_index(FenceID p_fence, uint32_t p_frame_index) override final;
 	virtual Error fence_wait(FenceID p_fence) override final;
 	virtual void fence_free(FenceID p_fence) override final;
 

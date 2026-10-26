@@ -408,6 +408,8 @@ public:
 	/****************/
 
 	virtual FenceID fence_create() = 0;
+	// Optional frame association for driver diagnostics; transfer fences have no frame slot.
+	virtual void fence_set_frame_index(FenceID p_fence, uint32_t p_frame_index) {}
 	virtual Error fence_wait(FenceID p_fence) = 0;
 	virtual void fence_free(FenceID p_fence) = 0;
 
