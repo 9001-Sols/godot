@@ -307,6 +307,9 @@ void ShaderMaterial::_get_property_list(List<PropertyInfo> *p_list) const {
 				if (cached.is_array()) {
 					// Allow some array conversions for backwards compatibility.
 					is_uniform_type_compatible = Variant::can_convert(pi.type, cached.get_type());
+				} else if (pi.type == Variant::COLOR && (cached.get_type() == Variant::VECTOR3 || cached.get_type() == Variant::VECTOR4)) {
+					// source_color uniforms are exposed as Color, but also accept vector values.
+					is_uniform_type_compatible = true;
 				} else {
 					is_uniform_type_compatible = pi.type == cached.get_type();
 				}
