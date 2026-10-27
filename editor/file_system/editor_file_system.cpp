@@ -3284,7 +3284,10 @@ void EditorFileSystem::reimport_files(const Vector<String> &p_files) {
 		String file = p_files[i];
 
 		ResourceUID::ID uid = ResourceUID::get_singleton()->text_to_id(file);
-		if (uid != ResourceUID::INVALID_ID && ResourceUID::get_singleton()->has_id(uid)) {
+		if (uid != ResourceUID::INVALID_ID) {
+			if (!ResourceUID::get_singleton()->has_id(uid)) {
+				continue;
+			}
 			file = ResourceUID::get_singleton()->get_id_path(uid);
 		}
 
