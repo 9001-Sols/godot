@@ -3276,6 +3276,7 @@ void EditorFileSystem::reimport_files(const Vector<String> &p_files) {
 	Vector<ImportFile> reimport_files;
 
 	HashSet<String> groups_to_reimport;
+	HashSet<String> queued_files;
 
 	for (int i = 0; i < p_files.size(); i++) {
 		ep->step(TTR("Preparing files to reimport..."), i, false);
@@ -3286,6 +3287,11 @@ void EditorFileSystem::reimport_files(const Vector<String> &p_files) {
 		if (uid != ResourceUID::INVALID_ID && ResourceUID::get_singleton()->has_id(uid)) {
 			file = ResourceUID::get_singleton()->get_id_path(uid);
 		}
+
+		if (queued_files.has(file)) {
+			continue;
+		}
+		queued_files.insert(file);
 
 		String group_file = ResourceFormatImporter::get_singleton()->get_import_group_file(file);
 
