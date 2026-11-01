@@ -63,8 +63,10 @@ namespace Godot.Collections
 
         public void Dispose(bool disposing)
         {
-            // Always dispose `NativeValue` even if disposing is true
-            NativeValue.DangerousSelfRef.Dispose();
+            // Native destroy writes through its pointer after GC may have moved this object; never pass the field itself.
+            godot_dictionary self = (godot_dictionary)NativeValue;
+            NativeValue = default;
+            self.Dispose();
 
             if (_weakReferenceToSelf != null)
             {

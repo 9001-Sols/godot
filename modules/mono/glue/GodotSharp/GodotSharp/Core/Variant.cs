@@ -40,7 +40,10 @@ public partial struct Variant : IDisposable
 
         private void Dispose(bool disposing)
         {
-            _native.DangerousSelfRef.Dispose();
+            // Native destroy writes through its pointer after GC may have moved this object; never pass the field itself.
+            godot_variant self = (godot_variant)_native;
+            _native = default;
+            self.Dispose();
 
             if (_weakReferenceToSelf != null)
             {
