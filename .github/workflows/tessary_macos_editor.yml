@@ -1,0 +1,137 @@
+name: Tessary macOS .NET editor
+on:
+  push:
+    tags: ["4.*-tessary.*"]
+    branches: [tessary-4.7.2]
+    paths: [.github/workflows/tessary_macos_editor.yml]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Fork tag to build (empty = newest tessary tag on this branch)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tessary-macos-editor-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ASSET: macos_editor_universal.mono
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ] && [ "${{ github.ref_type }}" = tag ]; then tag="${{ github.ref_name }}"; fi
+          if [ -z "$tag" ]; then
+            tag=$(gh api --paginate "repos/${{ github.repository }}/git/matching-refs/tags/4." --jq '.[].ref' \
+              | sed 's#refs/tags/##' | grep -E '^4\.[0-9]+\.[0-9]+-tessary\.[0-9]+$' | sort -V | tail -1)
+          fi
+          echo "$tag" | grep -Eq '^4\.[0-9]+\.[0-9]+-tessary\.[0-9]+$' || { echo "bad tag: $tag"; exit 1; }
+          version=${tag%%-tessary.*}
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sharp=$version-stable" >> "$GITHUB_OUTPUT"
+          echo "Building $tag"
+
+      - name: Checkout tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          submodules: recursive
+
+      - name: Restore Godot build cache
+        uses: ./.github/actions/godot-cache-restore
+        with:
+          cache-name: tessary-macos-editor-mono
+        continue-on-error: true
+
+      - name: Setup Python and SCons
+        uses: ./.github/actions/godot-deps
+
+      - name: Download SDKs
+        id: sdk
+        run: |
+          python ./misc/scripts/install_angle.py && echo "angle=yes" >> "$GITHUB_OUTPUT" || echo "angle=no" >> "$GITHUB_OUTPUT"
+          python3 ./misc/scripts/install_accesskit.py && echo "accesskit=yes" >> "$GITHUB_OUTPUT" || echo "accesskit=no" >> "$GITHUB_OUTPUT"
+          sh misc/scripts/install_vulkan_sdk_macos.sh && echo "vulkan=yes" >> "$GITHUB_OUTPUT" || echo "vulkan=no" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+      # Do not set BUILD_NAME: the engine checks expect custom_build in the version string, never official or gh.
+      - name: Compile
+        run: |
+          flags="target=editor module_mono_enabled=yes production=yes lto=none debug_symbols=yes separate_debug_symbols=yes
+            vulkan=${{ steps.sdk.outputs.vulkan }} accesskit=${{ steps.sdk.outputs.accesskit }} angle=${{ steps.sdk.outputs.angle }}
+            cache_path=${{ github.workspace }}/.scons_cache/ redirect_build_objects=no"
+          for arch in x86_64 arm64; do
+            scons platform=macos arch=$arch $flags
+          done
+          ls -l bin/
+
+      - name: Save Godot build cache
+        uses: ./.github/actions/godot-cache-save
+        with:
+          cache-name: tessary-macos-editor-mono
+        continue-on-error: true
+
+      - name: Bundle app
+        run: |
+          set -e
+          out=dist; mkdir -p $out
+          src=bin/godot.macos.editor
+          lipo -create $src.x86_64.mono $src.arm64.mono -output $out/Godot
+          mkdir -p $out/Godot.dSYM/Contents/Resources/DWARF
+          cp $src.arm64.mono.dSYM/Contents/Info.plist $out/Godot.dSYM/Contents/
+          lipo -create $src.x86_64.mono.dSYM/Contents/Resources/DWARF/godot.macos.editor.x86_64.mono \
+                       $src.arm64.mono.dSYM/Contents/Resources/DWARF/godot.macos.editor.arm64.mono \
+               -output $out/Godot.dSYM/Contents/Resources/DWARF/Godot
+          cp -R misc/dist/macos_tools.app $out/Godot.app
+          mkdir -p $out/Godot.app/Contents/MacOS
+          mv $out/Godot $out/Godot.app/Contents/MacOS/Godot
+          chmod +x $out/Godot.app/Contents/MacOS/Godot
+          sharp=${{ steps.tag.outputs.sharp }}
+          curl -fsSL -o official.zip "https://github.com/godotengine/godot-builds/releases/download/$sharp/Godot_v${sharp}_mono_macos.universal.zip"
+          unzip -q official.zip -d official
+          cp -R official/Godot_mono.app/Contents/Resources/GodotSharp $out/Godot.app/Contents/Resources/GodotSharp
+          echo "$sharp" > $out/Godot.app/Contents/Resources/GodotSharp/version.txt
+          codesign --force --deep --sign - $out/Godot.app
+          cd $out
+          ditto -c -k --keepParent Godot.app $ASSET.zip
+          ditto -c -k --keepParent Godot.dSYM $ASSET.dSYM.zip
+          shasum -a 256 $ASSET.zip $ASSET.dSYM.zip > $ASSET.SHA256SUMS
+          cat $ASSET.SHA256SUMS
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}-${{ steps.tag.outputs.tag }}
+          path: |
+            dist/${{ env.ASSET }}.zip
+            dist/${{ env.ASSET }}.dSYM.zip
+            dist/${{ env.ASSET }}.SHA256SUMS
+
+      - name: Smoke test
+        run: |
+          set -e
+          bin=dist/Godot.app/Contents/MacOS/Godot
+          $bin --headless --version | tee version.txt
+          if grep -qi official version.txt; then echo "official build string"; exit 1; fi
+          grep -q mono version.txt
+          test -f dist/Godot.app/Contents/Resources/GodotSharp/Api/Release/GodotSharp.dll
+
+      - name: Attach to release
+        run: |
+          tag=${{ steps.tag.outputs.tag }}
+          for i in $(seq 1 24); do
+            gh release view "$tag" --repo "${{ github.repository }}" > /dev/null 2>&1 && break
+            echo "release $tag not created yet; waiting"; sleep 300
+          done
+          gh release upload "$tag" --repo "${{ github.repository }}" --clobber \
+            dist/$ASSET.zip dist/$ASSET.dSYM.zip dist/$ASSET.SHA256SUMS
