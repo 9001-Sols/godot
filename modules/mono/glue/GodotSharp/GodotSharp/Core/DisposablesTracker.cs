@@ -87,8 +87,8 @@ namespace Godot
 
         public static void UnregisterDisposable(WeakReference<IDisposable> weakReference)
         {
-            if (!OtherInstances.TryRemove(weakReference, out _))
-                throw new ArgumentException("Disposable not registered.", nameof(weakReference));
+            // Runs from finalizers too: a throw here terminates the process.
+            OtherInstances.TryRemove(weakReference, out _);
         }
     }
 }

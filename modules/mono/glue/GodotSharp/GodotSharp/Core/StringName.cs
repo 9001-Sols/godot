@@ -40,9 +40,11 @@ namespace Godot
             NativeValue = default;
             self.Dispose();
 
-            if (_weakReferenceToSelf != null)
+            WeakReference<IDisposable>? weakReferenceToSelf = _weakReferenceToSelf;
+            _weakReferenceToSelf = null;
+            if (weakReferenceToSelf != null)
             {
-                DisposablesTracker.UnregisterDisposable(_weakReferenceToSelf);
+                DisposablesTracker.UnregisterDisposable(weakReferenceToSelf);
             }
         }
 

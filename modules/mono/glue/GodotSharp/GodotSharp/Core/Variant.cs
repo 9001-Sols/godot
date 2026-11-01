@@ -45,9 +45,11 @@ public partial struct Variant : IDisposable
             _native = default;
             self.Dispose();
 
-            if (_weakReferenceToSelf != null)
+            WeakReference<IDisposable>? weakReferenceToSelf = _weakReferenceToSelf;
+            _weakReferenceToSelf = null;
+            if (weakReferenceToSelf != null)
             {
-                DisposablesTracker.UnregisterDisposable(_weakReferenceToSelf);
+                DisposablesTracker.UnregisterDisposable(weakReferenceToSelf);
             }
         }
     }
