@@ -676,7 +676,14 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			ShaderGroup group = SHADER_GROUP_BASE;
 			bool advanced_group = (i & SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR) || (i & SHADER_COLOR_PASS_FLAG_LIGHTMAP) || (i & SHADER_COLOR_PASS_FLAG_MOTION_VECTORS);
 			bool multiview_group = i & SHADER_COLOR_PASS_FLAG_MULTIVIEW;
-			if (advanced_group && multiview_group) {
+			const int features = i & ~SHADER_COLOR_PASS_FLAG_UBERSHADER;
+			if (features == SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR) {
+				group = SHADER_GROUP_SEPARATE_SPECULAR;
+			} else if (features == SHADER_COLOR_PASS_FLAG_MOTION_VECTORS) {
+				group = SHADER_GROUP_MOTION_VECTORS;
+			} else if (features == (SHADER_COLOR_PASS_FLAG_SEPARATE_SPECULAR | SHADER_COLOR_PASS_FLAG_MOTION_VECTORS)) {
+				group = SHADER_GROUP_SEPARATE_SPECULAR_MOTION_VECTORS;
+			} else if (advanced_group && multiview_group) {
 				group = SHADER_GROUP_ADVANCED_MULTIVIEW;
 			} else if (advanced_group) {
 				group = SHADER_GROUP_ADVANCED;
@@ -1029,6 +1036,30 @@ void SceneShaderForwardClustered::enable_advanced_shader_group(bool p_needs_mult
 		shader.enable_group(SHADER_GROUP_ADVANCED_MULTIVIEW);
 	}
 	shader.enable_group(SHADER_GROUP_ADVANCED);
+	shader.enable_group(SHADER_GROUP_SEPARATE_SPECULAR);
+	shader.enable_group(SHADER_GROUP_MOTION_VECTORS);
+	shader.enable_group(SHADER_GROUP_SEPARATE_SPECULAR_MOTION_VECTORS);
+}
+
+void SceneShaderForwardClustered::enable_separate_specular_shader_group(bool p_needs_multiview) {
+	if (p_needs_multiview || RendererCompositorRD::get_singleton()->is_xr_enabled()) {
+		shader.enable_group(SHADER_GROUP_ADVANCED_MULTIVIEW);
+	}
+	shader.enable_group(SHADER_GROUP_SEPARATE_SPECULAR);
+}
+
+void SceneShaderForwardClustered::enable_motion_vectors_shader_group(bool p_needs_multiview) {
+	if (p_needs_multiview || RendererCompositorRD::get_singleton()->is_xr_enabled()) {
+		shader.enable_group(SHADER_GROUP_ADVANCED_MULTIVIEW);
+	}
+	shader.enable_group(SHADER_GROUP_MOTION_VECTORS);
+}
+
+void SceneShaderForwardClustered::enable_separate_specular_motion_vectors_shader_group(bool p_needs_multiview) {
+	if (p_needs_multiview || RendererCompositorRD::get_singleton()->is_xr_enabled()) {
+		shader.enable_group(SHADER_GROUP_ADVANCED_MULTIVIEW);
+	}
+	shader.enable_group(SHADER_GROUP_SEPARATE_SPECULAR_MOTION_VECTORS);
 }
 
 bool SceneShaderForwardClustered::is_multiview_shader_group_enabled() const {

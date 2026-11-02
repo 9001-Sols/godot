@@ -1867,7 +1867,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		if (p_render_data->scene_data->calculate_motion_vectors) {
 			color_pass_flags |= COLOR_PASS_FLAG_MOTION_VECTORS;
-			scene_shader.enable_advanced_shader_group();
+			scene_shader.enable_motion_vectors_shader_group();
+
+			if (global_pipeline_data_required.use_separate_specular) {
+				scene_shader.enable_separate_specular_motion_vectors_shader_group(p_render_data->scene_data->view_count > 1);
+			}
 
 			// Indicate pipelines for motion vectors are required.
 			global_pipeline_data_required.use_motion_vectors = true;
@@ -1984,8 +1988,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		rb_data->ensure_normal_roughness_texture();
 	}
 
-	if (using_sss || using_separate_specular || scene_state.used_lightmap || using_voxelgi || global_surface_data.sss_used) {
+	if (scene_state.used_lightmap || scene_state.lightmaps_used > 0 || using_voxelgi) {
 		scene_shader.enable_advanced_shader_group(p_render_data->scene_data->view_count > 1);
+	} else if (using_sss || using_separate_specular || global_surface_data.sss_used) {
+		scene_shader.enable_separate_specular_shader_group(p_render_data->scene_data->view_count > 1);
 	}
 
 	// Update the global pipeline requirements with all the features found to be in use in this scene.
@@ -2002,6 +2008,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 
 	if (using_separate_specular || global_surface_data.sss_used) {
+		if (global_pipeline_data_required.use_motion_vectors) {
+			scene_shader.enable_separate_specular_motion_vectors_shader_group(p_render_data->scene_data->view_count > 1);
+		}
 		global_pipeline_data_required.use_separate_specular = true;
 	}
 
