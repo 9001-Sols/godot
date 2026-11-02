@@ -48,6 +48,9 @@ public:
 		SHADER_GROUP_ADVANCED,
 		SHADER_GROUP_MULTIVIEW,
 		SHADER_GROUP_ADVANCED_MULTIVIEW,
+		SHADER_GROUP_SEPARATE_SPECULAR,
+		SHADER_GROUP_MOTION_VECTORS,
+		SHADER_GROUP_SEPARATE_SPECULAR_MOTION_VECTORS,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -382,6 +385,9 @@ public:
 	void set_default_specialization(const ShaderSpecialization &p_specialization);
 	void enable_multiview_shader_group();
 	void enable_advanced_shader_group(bool p_needs_multiview = false);
+	void enable_separate_specular_shader_group(bool p_needs_multiview = false);
+	void enable_motion_vectors_shader_group(bool p_needs_multiview = false);
+	void enable_separate_specular_motion_vectors_shader_group(bool p_needs_multiview = false);
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
