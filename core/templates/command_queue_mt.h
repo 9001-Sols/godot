@@ -190,16 +190,16 @@ class CommandQueueMT {
 
 			lock.temp_unlock();
 			cmd_local->call();
+			const bool sync = cmd_local->sync;
+			cmd_local->~CommandBase();
 			lock.temp_relock();
 
-			if (unlikely(cmd_local->sync)) {
+			if (unlikely(sync)) {
 				sync_head++;
 				lock.temp_unlock(); // Give an opportunity to awaiters right away.
 				sync_cond_var.notify_all();
 				lock.temp_relock();
 			}
-
-			cmd_local->~CommandBase();
 
 			flush_read_ptr += size;
 		}
