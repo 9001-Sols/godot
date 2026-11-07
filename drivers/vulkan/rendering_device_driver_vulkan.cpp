@@ -4558,7 +4558,7 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 #endif
 
 	if (store_respv) {
-		shader_info.respv_stage_shaders.reserve(stage_count);
+		shader_info.respv_stage_spirv.reserve(stage_count);
 	}
 
 	for (int i = 0; i < stage_count; i++) {
@@ -4593,18 +4593,17 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 
 		shader_info.original_stage_size.push_back(decoded_spirv.size());
 
-		if (use_respv) {
-			const bool inline_data = store_respv || (RESPV_ONLY_INLINE_SHADERS_WITH_SPEC_CONSTANTS == 0);
+		if (store_respv) {
+			// Do not store a parsed respv::Shader here. It is several times the SPIR-V size and, kept for every
+			// user shader, costs gigabytes of RAM in a scene with thousands of materials.
+			shader_info.respv_stage_spirv.push_back(decoded_spirv);
+		} else if (use_respv) {
+			const bool inline_data = (RESPV_ONLY_INLINE_SHADERS_WITH_SPEC_CONSTANTS == 0);
 			respv::Shader respv_shader(decoded_spirv.ptr(), decoded_spirv.size(), inline_data);
 			if (respv_shader.empty()) {
 #if RESPV_VERBOSE
 				print_line("re-spirv failed to parse the shader, skipping optimization.");
 #endif
-				if (store_respv) {
-					shader_info.respv_stage_shaders.push_back(respv::Shader());
-				}
-			} else if (store_respv) {
-				shader_info.respv_stage_shaders.push_back(respv_shader);
 			} else {
 				std::vector<uint8_t> respv_optimized_data;
 				if (respv::Optimizer::run(respv_shader, nullptr, 0, respv_optimized_data)) {
@@ -6344,10 +6343,15 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 
 		if (p_specialization_constants.size()) {
 			bool use_pipeline_spec_constants = true;
-			if ((i < shader_info->respv_stage_shaders.size()) && !shader_info->respv_stage_shaders[i].empty()) {
 #if RECORD_PIPELINE_STATISTICS
-				uint64_t respv_start_time = OS::get_singleton()->get_ticks_usec();
+			uint64_t respv_start_time = OS::get_singleton()->get_ticks_usec();
 #endif
+			respv::Shader respv_shader;
+			if (i < shader_info->respv_stage_spirv.size() && !shader_info->respv_stage_spirv[i].is_empty()) {
+				const Vector<uint8_t> &stage_spirv = shader_info->respv_stage_spirv[i];
+				respv_shader.parse(stage_spirv.ptr(), stage_spirv.size(), true);
+			}
+			if (!respv_shader.empty()) {
 				// Attempt to optimize the shader using re-spirv before relying on the driver.
 				respv_spec_constants.resize(p_specialization_constants.size());
 				for (uint32_t j = 0; j < p_specialization_constants.size(); j++) {
@@ -6360,7 +6364,7 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 #if RESPV_DONT_REMOVE_DEAD_CODE
 				respv_options.removeDeadCode = false;
 #endif
-				if (respv::Optimizer::run(shader_info->respv_stage_shaders[i], respv_spec_constants.ptr(), respv_spec_constants.size(), respv_optimized_data, respv_options)) {
+				if (respv::Optimizer::run(respv_shader, respv_spec_constants.ptr(), respv_spec_constants.size(), respv_optimized_data, respv_options)) {
 #if RESPV_VERBOSE
 					String spec_constants;
 					for (uint32_t j = 0; j < p_specialization_constants.size(); j++) {
@@ -6370,7 +6374,7 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 						}
 					}
 
-					print_line(vformat("re-spirv transformed the shader from %d bytes to %d bytes with constants %s (%d).", shader_info->respv_stage_shaders[i].inlinedSpirvWords.size() * sizeof(uint32_t), respv_optimized_data.size(), spec_constants, p_shader.id));
+					print_line(vformat("re-spirv transformed the shader from %d bytes to %d bytes with constants %s (%d).", respv_shader.inlinedSpirvWords.size() * sizeof(uint32_t), respv_optimized_data.size(), spec_constants, p_shader.id));
 #endif
 
 					// Create the shader module with the optimized output.
