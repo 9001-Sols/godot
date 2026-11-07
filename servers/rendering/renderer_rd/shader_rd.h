@@ -202,6 +202,7 @@ private:
 	String _get_cache_file_path(Version *p_version, int p_group, const String &p_api_name, bool p_user_dir);
 	bool _load_from_cache(Version *p_version, int p_group);
 	void _save_to_cache(Version *p_version, int p_group);
+	void _free_group_variant_data(Version *p_version, int p_group);
 	void _initialize_cache();
 	void _version_set(Version *p_version, const HashMap<String, String> &p_code, const Vector<String> &p_custom_defines);
 

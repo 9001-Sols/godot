@@ -685,8 +685,18 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 		}
 	}
 
+	_free_group_variant_data(p_version, p_group);
 	p_version->valid = true;
 	return true;
+}
+
+void ShaderRD::_free_group_variant_data(Version *p_version, int p_group) {
+	if (p_version->variant_data.is_empty()) {
+		return;
+	}
+	for (uint32_t i = 0; i < group_to_variant_map[p_group].size(); i++) {
+		p_version->variant_data.write[group_to_variant_map[p_group][i]] = Vector<uint8_t>();
+	}
 }
 
 void ShaderRD::_save_to_cache(Version *p_version, int p_group) {
@@ -841,6 +851,7 @@ void ShaderRD::_compile_version_end(Version *p_version, int p_group) {
 	}
 #endif
 
+	_free_group_variant_data(p_version, p_group);
 	p_version->valid = true;
 }
 
