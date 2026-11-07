@@ -37,6 +37,7 @@
 #include "drivers/vulkan/vulkan_hooks.h"
 
 #include <thirdparty/misc/smolv.h>
+#include <zstd.h>
 
 #if defined(SWAPPY_FRAME_PACING_ENABLED)
 #include "platform/android/java_godot_wrapper.h"
@@ -4451,6 +4452,42 @@ static VkShaderStageFlagBits RD_STAGE_TO_VK_SHADER_STAGE_BITS[RDD::SHADER_STAGE_
 	VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
 };
 
+// Pipeline creation calls this from many threads at once: do not use Compression::decompress here, its shared
+// zstd context is behind one global mutex.
+static bool _decode_shader_stage_code(const RenderingShaderContainer::Shader &p_shader, Vector<uint8_t> &r_scratch, Vector<uint8_t> &r_spirv) {
+	const uint8_t *input = p_shader.code_compressed_bytes.ptr();
+	size_t input_size = p_shader.code_compressed_bytes.size();
+	if (p_shader.code_decompressed_size > 0) {
+		r_scratch.resize(p_shader.code_decompressed_size);
+		if (p_shader.code_compression_flags & RenderingShaderContainer::COMPRESSION_FLAG_ZSTD) {
+			struct ThreadDCtx {
+				ZSTD_DCtx *ctx = ZSTD_createDCtx();
+				~ThreadDCtx() { ZSTD_freeDCtx(ctx); }
+			};
+			thread_local ThreadDCtx dctx;
+			ERR_FAIL_NULL_V(dctx.ctx, false);
+			size_t written = ZSTD_decompressDCtx(dctx.ctx, r_scratch.ptrw(), r_scratch.size(), input, input_size);
+			ERR_FAIL_COND_V_MSG(ZSTD_isError(written) || written != (size_t)r_scratch.size(), false, "Malformed zstd input for decompressing shader code.");
+		} else {
+			memcpy(r_scratch.ptrw(), input, MIN(input_size, (size_t)p_shader.code_decompressed_size));
+		}
+		input = r_scratch.ptr();
+		input_size = r_scratch.size();
+	}
+
+	if (p_shader.code_compression_flags & RenderingShaderContainerVulkan::COMPRESSION_FLAG_SMOLV) {
+		size_t decoded_size = smolv::GetDecodedBufferSize(input, input_size);
+		ERR_FAIL_COND_V_MSG(decoded_size == 0, false, "Malformed smolv input for shader code.");
+		r_spirv.resize(decoded_size);
+		ERR_FAIL_COND_V_MSG(!smolv::Decode(input, input_size, r_spirv.ptrw(), r_spirv.size()), false, "Malformed smolv input for shader code.");
+		return true;
+	}
+
+	r_spirv.resize(input_size);
+	memcpy(r_spirv.ptrw(), input, input_size);
+	return true;
+}
+
 RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) {
 	ShaderReflection shader_refl = p_shader_container->get_shader_reflection();
 	ShaderInfo shader_info;
@@ -4558,45 +4595,22 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 #endif
 
 	if (store_respv) {
-		shader_info.respv_stage_spirv.reserve(stage_count);
+		shader_info.respv_stage_code.reserve(stage_count);
 	}
 
 	for (int i = 0; i < stage_count; i++) {
 		const RenderingShaderContainer::Shader &shader = p_shader_container->shaders[i];
-		bool requires_decompression = (shader.code_decompressed_size > 0);
-		if (requires_decompression) {
-			decompressed_code.resize(shader.code_decompressed_size);
-			bool decompressed = p_shader_container->decompress_code(shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size(), shader.code_compression_flags, decompressed_code.ptrw(), decompressed_code.size());
-			if (!decompressed) {
-				error_text = vformat("Failed to decompress code on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
-				break;
-			}
-		}
-
-		const uint8_t *smolv_input = requires_decompression ? decompressed_code.ptr() : shader.code_compressed_bytes.ptr();
-		uint32_t smolv_input_size = requires_decompression ? decompressed_code.size() : shader.code_compressed_bytes.size();
-		if (shader.code_compression_flags & RenderingShaderContainerVulkan::COMPRESSION_FLAG_SMOLV) {
-			decoded_spirv.resize(smolv::GetDecodedBufferSize(smolv_input, smolv_input_size));
-			if (decoded_spirv.is_empty()) {
-				error_text = vformat("Malformed smolv input on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
-				break;
-			}
-
-			if (!smolv::Decode(smolv_input, smolv_input_size, decoded_spirv.ptrw(), decoded_spirv.size())) {
-				error_text = vformat("Malformed smolv input on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
-				break;
-			}
-		} else {
-			decoded_spirv.resize(smolv_input_size);
-			memcpy(decoded_spirv.ptrw(), smolv_input, decoded_spirv.size());
+		if (!_decode_shader_stage_code(shader, decompressed_code, decoded_spirv)) {
+			error_text = vformat("Malformed code on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
+			break;
 		}
 
 		shader_info.original_stage_size.push_back(decoded_spirv.size());
 
 		if (store_respv) {
-			// Do not store a parsed respv::Shader here. It is several times the SPIR-V size and, kept for every
-			// user shader, costs gigabytes of RAM in a scene with thousands of materials.
-			shader_info.respv_stage_spirv.push_back(decoded_spirv);
+			// Do not store a parsed respv::Shader or the decoded SPIR-V here. Both are several times the size of the
+			// container's compressed code and, kept for every shader variant, cost gigabytes of RAM.
+			shader_info.respv_stage_code.push_back(shader);
 		} else if (use_respv) {
 			const bool inline_data = (RESPV_ONLY_INLINE_SHADERS_WITH_SPEC_CONSTANTS == 0);
 			respv::Shader respv_shader(decoded_spirv.ptr(), decoded_spirv.size(), inline_data);
@@ -6347,9 +6361,12 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 			uint64_t respv_start_time = OS::get_singleton()->get_ticks_usec();
 #endif
 			respv::Shader respv_shader;
-			if (i < shader_info->respv_stage_spirv.size() && !shader_info->respv_stage_spirv[i].is_empty()) {
-				const Vector<uint8_t> &stage_spirv = shader_info->respv_stage_spirv[i];
-				respv_shader.parse(stage_spirv.ptr(), stage_spirv.size(), true);
+			if (i < shader_info->respv_stage_code.size() && !shader_info->respv_stage_code[i].code_compressed_bytes.is_empty()) {
+				thread_local Vector<uint8_t> respv_decompressed;
+				thread_local Vector<uint8_t> respv_spirv;
+				if (_decode_shader_stage_code(shader_info->respv_stage_code[i], respv_decompressed, respv_spirv)) {
+					respv_shader.parse(respv_spirv.ptr(), respv_spirv.size(), true);
+				}
 			}
 			if (!respv_shader.empty()) {
 				// Attempt to optimize the shader using re-spirv before relying on the driver.
