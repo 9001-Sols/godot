@@ -637,7 +637,7 @@ private:
 	struct PipelineCache {
 		String file_path;
 		size_t current_size = 0;
-		Vector<uint8_t> buffer; // Header then data.
+		Vector<uint8_t> buffer; // Header only. The cache data lives in the driver's VkPipelineCache.
 		VkPipelineCache vk_cache = VK_NULL_HANDLE;
 	};
 

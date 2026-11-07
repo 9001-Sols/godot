@@ -5542,6 +5542,7 @@ bool RenderingDeviceDriverVulkan::pipeline_cache_create(const Vector<uint8_t> &p
 		cache_info.pInitialData = pipelines_cache.buffer.ptr() + sizeof(PipelineCacheHeader);
 
 		VkResult err = vkCreatePipelineCache(vk_device, &cache_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE_CACHE), &pipelines_cache.vk_cache);
+		pipelines_cache.buffer = pipelines_cache.buffer.slice(0, sizeof(PipelineCacheHeader));
 		if (err != VK_SUCCESS) {
 			WARN_PRINT("vkCreatePipelinecache failed with error " + itos(err) + ".");
 			return false;
@@ -5576,20 +5577,22 @@ size_t RenderingDeviceDriverVulkan::pipeline_cache_query_size() {
 Vector<uint8_t> RenderingDeviceDriverVulkan::pipeline_cache_serialize() {
 	DEV_ASSERT(pipelines_cache.vk_cache);
 
-	pipelines_cache.buffer.resize(pipelines_cache.current_size + sizeof(PipelineCacheHeader));
+	Vector<uint8_t> blob;
+	blob.resize(pipelines_cache.current_size + sizeof(PipelineCacheHeader));
+	memcpy(blob.ptrw(), pipelines_cache.buffer.ptr(), sizeof(PipelineCacheHeader));
 
-	VkResult err = vkGetPipelineCacheData(vk_device, pipelines_cache.vk_cache, &pipelines_cache.current_size, pipelines_cache.buffer.ptrw() + sizeof(PipelineCacheHeader));
+	VkResult err = vkGetPipelineCacheData(vk_device, pipelines_cache.vk_cache, &pipelines_cache.current_size, blob.ptrw() + sizeof(PipelineCacheHeader));
 	// Incomplete is OK because the cache may have grown since the size was queried (unless when exiting).
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS && err != VK_INCOMPLETE, Vector<uint8_t>(), vformat("Couldn't get Vulkan pipeline cache data (VkResult error %d).", err));
 
 	// The real buffer size may now be bigger than the updated current_size.
-	// We take into account the new size but keep the buffer resized in a worst-case fashion.
+	// We take into account the new size but keep the blob sized in a worst-case fashion.
 
-	PipelineCacheHeader *header = (PipelineCacheHeader *)pipelines_cache.buffer.ptrw();
+	PipelineCacheHeader *header = (PipelineCacheHeader *)blob.ptrw();
 	header->data_size = pipelines_cache.current_size;
-	header->data_hash = hash_murmur3_buffer(pipelines_cache.buffer.ptr() + sizeof(PipelineCacheHeader), pipelines_cache.current_size);
+	header->data_hash = hash_murmur3_buffer(blob.ptr() + sizeof(PipelineCacheHeader), pipelines_cache.current_size);
 
-	return pipelines_cache.buffer;
+	return blob;
 }
 
 /*******************/
