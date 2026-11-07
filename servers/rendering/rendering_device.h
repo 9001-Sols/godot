@@ -1693,6 +1693,7 @@ private:
 		uint32_t max_transfer_size = 0;
 		uint32_t staging_buffer_size_in_use = 0;
 		uint32_t staging_buffer_size_allocated = 0;
+		uint64_t last_used_frame = 0;
 		RDD::CommandBufferID command_buffer;
 		RDD::CommandPoolID command_pool;
 		RDD::FenceID command_fence;
@@ -1730,6 +1731,7 @@ private:
 	void _submit_transfer_workers(RDD::CommandBufferID p_draw_command_buffer = RDD::CommandBufferID());
 	void _submit_transfer_barriers(RDD::CommandBufferID p_draw_command_buffer);
 	void _wait_for_transfer_workers();
+	void _trim_transfer_workers();
 	void _free_transfer_workers();
 
 	/***********************/

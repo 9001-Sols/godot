@@ -7374,6 +7374,7 @@ void RenderingDevice::_submit_transfer_workers(RDD::CommandBufferID p_draw_comma
 				VectorView<RDD::SemaphoreID> semaphores = p_draw_command_buffer ? frames[frame].transfer_worker_semaphores[i] : VectorView<RDD::SemaphoreID>();
 				_end_transfer_worker(worker);
 				_submit_transfer_worker(worker, semaphores);
+				worker->last_used_frame = frames_drawn;
 			}
 
 			if (p_draw_command_buffer) {
@@ -7402,12 +7403,44 @@ void RenderingDevice::_wait_for_transfer_workers() {
 	}
 }
 
+void RenderingDevice::_trim_transfer_workers() {
+	const uint32_t trim_min_staging_size = 16 * 1024 * 1024;
+	const uint64_t trim_idle_frames = 120;
+	thread_local LocalVector<RDD::BufferID> trimmed_buffers;
+	trimmed_buffers.clear();
+	{
+		MutexLock transfer_worker_lock(transfer_worker_pool_mutex);
+		for (uint32_t i = 0; i < transfer_worker_pool_available_list.size(); i++) {
+			TransferWorker *worker = transfer_worker_pool[transfer_worker_pool_available_list[i]];
+			MutexLock lock(worker->thread_mutex);
+			if (worker->recording || worker->staging_buffer_size_allocated <= trim_min_staging_size || frames_drawn - worker->last_used_frame < trim_idle_frames) {
+				continue;
+			}
+
+			if (worker->submitted) {
+				_wait_for_transfer_worker(worker);
+			}
+
+			trimmed_buffers.push_back(worker->staging_buffer);
+			worker->staging_buffer = RDD::BufferID();
+			worker->staging_buffer_size_allocated = 0;
+			worker->max_transfer_size = 0;
+		}
+	}
+
+	for (RDD::BufferID buffer : trimmed_buffers) {
+		driver->buffer_free(buffer);
+	}
+}
+
 void RenderingDevice::_free_transfer_workers() {
 	MutexLock transfer_worker_lock(transfer_worker_pool_mutex);
 	for (uint32_t i = 0; i < transfer_worker_pool_size; i++) {
 		TransferWorker *worker = transfer_worker_pool[i];
 		driver->fence_free(worker->command_fence);
-		driver->buffer_free(worker->staging_buffer);
+		if (worker->staging_buffer.id != 0) {
+			driver->buffer_free(worker->staging_buffer);
+		}
 		driver->command_pool_free(worker->command_pool);
 		memdelete(worker);
 	}
@@ -8116,6 +8149,8 @@ void RenderingDevice::_end_frame() {
 	RDD::CommandBufferID command_buffer = frames[frame].command_buffer;
 	GodotProfileZoneGroupedFirst(_profile_zone, "_submit_transfer_workers");
 	_submit_transfer_workers(command_buffer);
+	GodotProfileZoneGrouped(_profile_zone, "_trim_transfer_workers");
+	_trim_transfer_workers();
 	GodotProfileZoneGrouped(_profile_zone, "_submit_transfer_barriers");
 	_submit_transfer_barriers(command_buffer);
 
