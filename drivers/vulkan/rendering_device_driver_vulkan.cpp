@@ -5585,8 +5585,7 @@ Vector<uint8_t> RenderingDeviceDriverVulkan::pipeline_cache_serialize() {
 	// Incomplete is OK because the cache may have grown since the size was queried (unless when exiting).
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS && err != VK_INCOMPLETE, Vector<uint8_t>(), vformat("Couldn't get Vulkan pipeline cache data (VkResult error %d).", err));
 
-	// The real buffer size may now be bigger than the updated current_size.
-	// We take into account the new size but keep the blob sized in a worst-case fashion.
+	blob.resize(pipelines_cache.current_size + sizeof(PipelineCacheHeader));
 
 	PipelineCacheHeader *header = (PipelineCacheHeader *)blob.ptrw();
 	header->data_size = pipelines_cache.current_size;
