@@ -37,6 +37,7 @@
 #include "drivers/vulkan/vulkan_hooks.h"
 
 #include <thirdparty/misc/smolv.h>
+
 #include <zstd.h>
 
 #if defined(SWAPPY_FRAME_PACING_ENABLED)
