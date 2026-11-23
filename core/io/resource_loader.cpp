@@ -33,6 +33,7 @@
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/core_bind.h"
+#include "core/io/cook_trace.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_importer.h"
@@ -750,6 +751,7 @@ Ref<Resource> ResourceLoader::load(const String &p_path, const String &p_type_hi
 Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path, const String &p_type_hint, LoadThreadMode p_thread_mode, CacheMode p_cache_mode, bool p_for_user) {
 	String local_path = _validate_local_path(p_path);
 	ERR_FAIL_COND_V(local_path.is_empty(), Ref<ResourceLoader::LoadToken>());
+	CookTrace::note(local_path);
 
 	bool ignoring_cache = p_cache_mode == CACHE_MODE_IGNORE || p_cache_mode == CACHE_MODE_IGNORE_DEEP;
 

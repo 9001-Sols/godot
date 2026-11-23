@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="CookTrace" inherits="Object" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Records the paths that the process reads while a trace is active.
+	</brief_description>
+	<description>
+		Between [method begin] and [method end], the engine records each path that [FileAccess] opens for reading, each path that [method FileAccess.file_exists] checks, each directory that [DirAccess] opens and each path that [ResourceLoader] loads, including cache hits. A build step uses the list as the exact set of its input files.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="begin">
+			<return type="void" />
+			<description>
+				Clears the recorded paths and starts the trace.
+			</description>
+		</method>
+		<method name="end">
+			<return type="PackedStringArray" />
+			<description>
+				Stops the trace and returns the recorded paths, sorted.
+			</description>
+		</method>
+		<method name="snapshot">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the paths recorded so far, sorted, and keeps the trace active.
+			</description>
+		</method>
+		<method name="is_active" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while a trace is active.
+			</description>
+		</method>
+	</methods>
+</class>

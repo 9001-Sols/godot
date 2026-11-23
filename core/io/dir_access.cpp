@@ -31,6 +31,7 @@
 #include "dir_access.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/cook_trace.h"
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
@@ -237,6 +238,7 @@ Ref<DirAccess> DirAccess::create_for_path(const String &p_path) {
 }
 
 Ref<DirAccess> DirAccess::open(const String &p_path, Error *r_error) {
+	CookTrace::note(p_path);
 	Ref<DirAccess> da = create_for_path(p_path);
 	ERR_FAIL_COND_V_MSG(da.is_null(), nullptr, vformat("Cannot create DirAccess for path '%s'.", p_path));
 	Error err = da->change_dir(p_path);

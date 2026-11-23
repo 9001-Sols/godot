@@ -33,6 +33,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/crypto/crypto_core.h"
+#include "core/io/cook_trace.h"
 #include "core/io/file_access_compressed.h"
 #include "core/io/file_access_encrypted.h"
 #include "core/io/file_access_pack.h"
@@ -52,6 +53,7 @@ Ref<FileAccess> FileAccess::create(AccessType p_access) {
 }
 
 bool FileAccess::exists(const String &p_name) {
+	CookTrace::note(p_name);
 	if (PackedData::get_singleton() && !PackedData::get_singleton()->is_disabled() && PackedData::get_singleton()->has_path(p_name)) {
 		return true;
 	}
@@ -158,6 +160,9 @@ Error FileAccess::reopen(const String &p_path, int p_mode_flags) {
 }
 
 Ref<FileAccess> FileAccess::open(const String &p_path, int p_mode_flags, Error *r_error) {
+	if (!(p_mode_flags & WRITE)) {
+		CookTrace::note(p_path);
+	}
 	//try packed data first
 
 	Ref<FileAccess> ret;
