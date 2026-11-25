@@ -1559,6 +1559,9 @@
 		<member name="ClassDB" type="ClassDB" setter="" getter="">
 			The [ClassDB] singleton.
 		</member>
+		<member name="CookTrace" type="CookTrace" setter="" getter="">
+			The [CookTrace] singleton.
+		</member>
 		<member name="DisplayServer" type="DisplayServer" setter="" getter="">
 			The [DisplayServer] singleton.
 		</member>

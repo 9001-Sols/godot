@@ -21,16 +21,16 @@
 				Stops the trace and returns the recorded paths, sorted.
 			</description>
 		</method>
-		<method name="snapshot">
-			<return type="PackedStringArray" />
-			<description>
-				Returns the paths recorded so far, sorted, and keeps the trace active.
-			</description>
-		</method>
 		<method name="is_active" qualifiers="const">
 			<return type="bool" />
 			<description>
 				Returns [code]true[/code] while a trace is active.
+			</description>
+		</method>
+		<method name="snapshot">
+			<return type="PackedStringArray" />
+			<description>
+				Returns the paths recorded so far, sorted, and keeps the trace active.
 			</description>
 		</method>
 	</methods>
