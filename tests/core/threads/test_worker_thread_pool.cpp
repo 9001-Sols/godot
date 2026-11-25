@@ -174,4 +174,73 @@ TEST_CASE("[WorkerThreadPool] Run a yielding daemon as the only hope for other t
 	CHECK_MESSAGE(all_needed_yield, "All legit tasks should have needed the daemon yielding to run.");
 }
 
+struct ExitLanguagesData {
+	WorkerThreadPool *pool = nullptr;
+	SafeFlag finished;
+	SafeFlag timed_out;
+	SafeNumeric<int> woken_threads;
+};
+
+static void static_slow_low_priority_task(void *p_arg) {
+	((SafeFlag *)p_arg)->set();
+	OS::get_singleton()->delay_usec(100000);
+}
+
+static void static_wake_task(void *p_arg) {
+	ExitLanguagesData *data = (ExitLanguagesData *)p_arg;
+	// Keep this thread busy until every thread took one of these tasks.
+	data->woken_threads.increment();
+	const uint64_t deadline = OS::get_singleton()->get_ticks_msec() + 1000;
+	while (data->woken_threads.get() < data->pool->get_thread_count() && OS::get_singleton()->get_ticks_msec() < deadline) {
+		OS::get_singleton()->delay_usec(1000);
+	}
+}
+
+static void static_exit_languages_watchdog(void *p_arg) {
+	ExitLanguagesData *data = (ExitLanguagesData *)p_arg;
+	const uint64_t deadline = OS::get_singleton()->get_ticks_msec() + 3000;
+	while (!data->finished.is_set() && OS::get_singleton()->get_ticks_msec() < deadline) {
+		OS::get_singleton()->delay_usec(1000);
+	}
+	if (data->finished.is_set()) {
+		return;
+	}
+
+	// The pool is stuck. Wake every thread with a task so the test fails instead of hanging.
+	data->timed_out.set();
+	LocalVector<WorkerThreadPool::TaskID> task_ids;
+	for (int i = 0; i < data->pool->get_thread_count(); i++) {
+		task_ids.push_back(data->pool->add_native_task(static_wake_task, data, true));
+	}
+	for (WorkerThreadPool::TaskID task_id : task_ids) {
+		data->pool->wait_for_task_completion(task_id);
+	}
+}
+
+TEST_CASE("[WorkerThreadPool] Exit languages while low-priority tasks are queued") {
+	WorkerThreadPool pool(false);
+	// Two threads with a single low-priority slot, so further low-priority tasks have to queue.
+	pool.init(2, 0.5);
+
+	SafeFlag started;
+	pool.add_native_task(static_slow_low_priority_task, &started, false);
+	while (!started.is_set()) {
+		OS::get_singleton()->delay_usec(1000);
+	}
+	SafeFlag queued_started;
+	for (int i = 0; i < 3; i++) {
+		pool.add_native_task(static_slow_low_priority_task, &queued_started, false);
+	}
+
+	ExitLanguagesData data;
+	data.pool = &pool;
+	Thread watchdog;
+	watchdog.start(static_exit_languages_watchdog, &data);
+	pool.exit_languages_threads();
+	data.finished.set();
+	watchdog.wait_to_finish();
+
+	CHECK_MESSAGE(!data.timed_out.is_set(), "All threads should report idle once the queued low-priority tasks have run.");
+}
+
 } // namespace TestWorkerThreadPool
